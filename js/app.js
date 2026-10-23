@@ -74,18 +74,84 @@
 
   // Custom dropdown helper (searchable, matches app design)
 
-  function customerBalance(customerId, customerName) {
-    let due = 0, paid = 0, total = 0;
+  function invoiceBelongsToCustomer(inv, customerId, customerName, customerPhone) {
+    if (customerId && inv.customerId === customerId) return true;
+    const invName = (inv.customerName || '').trim().toLowerCase();
+    const name = (customerName || '').trim().toLowerCase();
+    if (!name || invName !== name) return false;
+    // Same name: also match phone if both have phone
+    const invPhone = (inv.customerPhone || '').replace(/\D/g, '');
+    const phone = (customerPhone || '').replace(/\D/g, '');
+    if (phone && invPhone) return invPhone === phone || invPhone.endsWith(phone) || phone.endsWith(invPhone);
+    // If invoice has customerId pointing elsewhere, don't steal it
+    if (inv.customerId && customerId && inv.customerId !== customerId) return false;
+    return true;
+  }
+
+  function customerBalance(customerId, customerName, customerPhone) {
+    let due = 0, paid = 0, total = 0, count = 0;
     invoices.forEach(inv => {
-      const match = (customerId && inv.customerId === customerId) ||
-        (!customerId && customerName && (inv.customerName || '').toLowerCase() === customerName.toLowerCase());
-      if (!match) return;
+      if (!invoiceBelongsToCustomer(inv, customerId, customerName, customerPhone)) return;
       total += inv.total || 0;
       paid += inv.paidAmount || 0;
       due += Math.max(0, (inv.total || 0) - (inv.paidAmount || 0));
+      count++;
     });
-    return { due, paid, total };
+    return { due, paid, total, count };
   }
+
+  function findOrCreateCustomer(name, phone) {
+    name = (name || '').trim();
+    phone = (phone || '').trim();
+    if (!name || name === 'Walk-in Customer') return null;
+    const phoneDigits = phone.replace(/\D/g, '');
+    // Prefer match by name + phone
+    let c = customers.find(x => {
+      const sameName = x.name.toLowerCase() === name.toLowerCase();
+      if (!sameName) return false;
+      if (!phoneDigits) return true;
+      const xp = (x.phone || '').replace(/\D/g, '');
+      return !xp || xp === phoneDigits || xp.endsWith(phoneDigits) || phoneDigits.endsWith(xp);
+    });
+    if (c) {
+      if (phone && !c.phone) { c.phone = phone; persist(); }
+      return c;
+    }
+    // Exact name only if unique
+    const sameName = customers.filter(x => x.name.toLowerCase() === name.toLowerCase());
+    if (sameName.length === 1 && !phoneDigits) return sameName[0];
+    // Create new
+    c = { id: uid(), name, phone, address: '', notes: '' };
+    customers.push(c);
+    persist();
+    return c;
+  }
+
+  // One-time migration: link invoices to customers by name, migrate old storage keys
+  function migrateData() {
+    try {
+      if (!localStorage.getItem('sb_migrated_v3')) {
+        ['products','invoices','customers','suppliers'].forEach(k => {
+          const old = localStorage.getItem('stockbill_' + k) || localStorage.getItem('sb_' + k);
+          if (old && !localStorage.getItem('sb_' + k + '_v2')) {
+            localStorage.setItem('sb_' + k + '_v2', old);
+          }
+        });
+        localStorage.setItem('sb_migrated_v3', '1');
+      }
+    } catch(e) {}
+    // Link orphan invoices to customers by name/phone
+    let changed = false;
+    invoices.forEach(inv => {
+      if (inv.customerId) return;
+      const name = (inv.customerName || '').trim();
+      if (!name || name === 'Walk-in Customer') return;
+      const c = findOrCreateCustomer(name, inv.customerPhone || '');
+      if (c) { inv.customerId = c.id; changed = true; }
+    });
+    if (changed) persist();
+  }
+
 
   function customSelect(name, options, selectedValue, placeholder, searchable) {
     const selected = options.find(o => o.value === selectedValue) || options[0];
@@ -284,9 +350,9 @@
     const customerOptions = [
       { value: '', label: 'Walk-in Customer' },
       ...customers.map(c => {
-        const bal = customerBalance(c.id, c.name);
+        const bal = customerBalance(c.id, c.name, c.phone);
         const debt = bal.due > 0 ? ` · Due ${settings.currency} ${money(bal.due)}` : '';
-        return { value: c.id, label: c.name + (c.phone ? ' · ' + c.phone : '') + debt };
+        return { value: c.id, label: c.name + (c.phone ? ' · ' + c.phone : ' · no phone') + debt };
       })
     ];
     return `<div class="fade-in">
@@ -492,14 +558,13 @@
       }
       if (!customerName) customerName = 'Walk-in Customer';
 
-      // Auto-create customer if typed new name with phone
-      if (!customerId && customerName !== 'Walk-in Customer') {
-        const existing = customers.find(c => c.name.toLowerCase() === customerName.toLowerCase());
-        if (existing) {
-          customerId = existing.id;
-        } else if (customerPhone) {
-          customerId = uid();
-          customers.push({ id: customerId, name: customerName, phone: customerPhone, address: '', notes: '' });
+      // Always attach to one customer account when not walk-in
+      if (customerName !== 'Walk-in Customer') {
+        const c = findOrCreateCustomer(customerName, customerPhone);
+        if (c) {
+          customerId = c.id;
+          customerName = c.name;
+          if (!customerPhone) customerPhone = c.phone || '';
         }
       }
 
@@ -545,7 +610,7 @@
         <input type="search" class="search-input" id="customerSearch" placeholder="Search customers..." />
       </div>
       <div class="list" id="customerList">${sorted.map(c => {
-        const bal = customerBalance(c.id, c.name);
+        const bal = customerBalance(c.id, c.name, c.phone);
         const dueHtml = bal.due > 0
           ? `<span class="list-item-badge badge-out">Due ${settings.currency} ${money(bal.due)}</span>`
           : (bal.total > 0 ? `<span class="list-item-badge badge-ok">Clear</span>` : '');
@@ -566,9 +631,9 @@
   }
 
   function openCustomerDetail(cust) {
-    const bal = customerBalance(cust.id, cust.name);
+    const bal = customerBalance(cust.id, cust.name, cust.phone);
     const custInvoices = invoices.filter(inv =>
-      inv.customerId === cust.id || (inv.customerName || '').toLowerCase() === (cust.name || '').toLowerCase()
+      invoiceBelongsToCustomer(inv, cust.id, cust.name, cust.phone)
     ).sort((a,b) => new Date(b.date) - new Date(a.date));
 
     $('#modalRoot').innerHTML = `
@@ -758,6 +823,11 @@
         <button class="menu-item" data-action="export-data">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Export / Backup
+          <svg class="menu-item-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <button class="menu-item" data-action="import-data">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Import Backup
           <svg class="menu-item-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
         <button class="menu-item" data-action="clear-data">
@@ -1159,134 +1229,220 @@
   function generatePDF(inv) {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-    const m = 16;
-    let y = 18;
+    const pageW = 210;
+    const m = 18;
+    let y = 0;
+    const paid = inv.paidAmount || 0;
+    const due = Math.max(0, (inv.total || 0) - paid);
+    const statusText = due <= 0 ? 'PAID' : (paid > 0 ? 'PARTIAL' : 'UNPAID');
 
-    // Header bar
+    // Top accent
     doc.setFillColor(13, 148, 136);
-    doc.rect(0, 0, 210, 32, 'F');
+    doc.rect(0, 0, pageW, 42, 'F');
+    // subtle bottom strip
+    doc.setFillColor(15, 118, 110);
+    doc.rect(0, 40, pageW, 2, 'F');
+
     doc.setTextColor(255, 255, 255);
     let textX = m;
     if (settings.logo) {
       try {
-        doc.addImage(settings.logo, 'PNG', m, 6, 18, 18);
-        textX = m + 22;
+        doc.setFillColor(255, 255, 255);
+        doc.roundedRect(m, 8, 22, 22, 3, 3, 'F');
+        doc.addImage(settings.logo, 'PNG', m + 2, 10, 18, 18);
+        textX = m + 28;
       } catch (e) {}
     }
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.text(settings.businessName || 'Invoice', textX, 14);
-    doc.setFontSize(9);
+    doc.setFontSize(18);
+    doc.text(settings.businessName || 'Invoice', textX, 18);
     doc.setFont('helvetica', 'normal');
-    let headerRight = [];
-    if (settings.phone) headerRight.push(settings.phone);
-    if (settings.email) headerRight.push(settings.email);
-    doc.text(headerRight.join('  |  '), 210 - m, 14, { align: 'right' });
-    y = 40;
+    doc.setFontSize(9);
+    const sub = [settings.phone, settings.email, settings.city].filter(Boolean).join('  ·  ');
+    if (sub) doc.text(sub, textX, 26);
+    if (settings.address) doc.text(String(settings.address).substring(0, 50), textX, 32);
 
-    doc.setTextColor(15, 23, 42);
+    // INVOICE badge on right
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13);
-    doc.text(`Invoice ${inv.number}`, m, y);
-    y += 6;
+    doc.setFontSize(11);
+    doc.text('INVOICE', pageW - m, 16, { align: 'right' });
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
-    doc.setTextColor(100);
-    doc.text(`Date: ${formatDate(inv.date)}`, m, y);
-    y += 8;
+    doc.text(String(inv.number), pageW - m, 23, { align: 'right' });
+    doc.text(formatDate(inv.date), pageW - m, 30, { align: 'right' });
 
+    y = 54;
+    doc.setTextColor(15, 23, 42);
+
+    // Two columns: Bill To + Payment
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(100);
+    doc.text('BILL TO', m, y);
+    doc.text('PAYMENT', pageW / 2 + 5, y);
+    y += 6;
     doc.setTextColor(15, 23, 42);
     doc.setFont('helvetica', 'bold');
-    doc.text('Bill To', m, y);
-    y += 5;
-    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
     doc.text(inv.customerName || 'Walk-in Customer', m, y);
-    y += 5;
-    if (inv.customerPhone) { doc.text(inv.customerPhone, m, y); y += 5; }
-    if (settings.address) {
-      doc.setFontSize(9);
-      doc.setTextColor(100);
-      doc.text(settings.address + (settings.city ? ', ' + settings.city : ''), m, y);
-      y += 5;
-    }
+    // Status pill
+    if (statusText === 'PAID') doc.setFillColor(16, 185, 129);
+    else if (statusText === 'PARTIAL') doc.setFillColor(245, 158, 11);
+    else doc.setFillColor(239, 68, 68);
+    doc.roundedRect(pageW / 2 + 5, y - 5, 28, 8, 2, 2, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text(statusText, pageW / 2 + 19, y, { align: 'center' });
     y += 6;
+    doc.setTextColor(80);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    if (inv.customerPhone) doc.text(inv.customerPhone, m, y);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`Paid: ${settings.currency} ${money(paid)}`, pageW / 2 + 5, y);
+    y += 5;
+    if (due > 0) {
+      doc.setTextColor(185, 28, 28);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`Due: ${settings.currency} ${money(due)}`, pageW / 2 + 5, y);
+    }
+    y += 12;
 
     // Table header
     doc.setFillColor(241, 245, 249);
-    doc.rect(m, y - 4, 178, 8, 'F');
+    doc.roundedRect(m, y - 5, pageW - 2 * m, 10, 2, 2, 'F');
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
-    doc.setTextColor(15, 23, 42);
-    doc.text('Item', m + 2, y);
-    doc.text('Qty', m + 100, y);
-    doc.text('Price', m + 125, y);
-    doc.text('Amount', m + 155, y);
-    y += 8;
+    doc.setTextColor(71, 85, 105);
+    doc.text('ITEM', m + 3, y);
+    doc.text('QTY', m + 95, y);
+    doc.text('PRICE', m + 120, y);
+    doc.text('AMOUNT', pageW - m - 3, y, { align: 'right' });
+    y += 10;
 
     doc.setFont('helvetica', 'normal');
-    inv.items.forEach(it => {
-      if (y > 270) { doc.addPage(); y = 20; }
-      doc.text(String(it.name).substring(0, 42), m + 2, y);
-      doc.text(String(it.qty), m + 100, y);
-      doc.text(money(it.price), m + 125, y);
-      doc.text(money(it.price * it.qty), m + 155, y);
-      y += 6;
+    doc.setTextColor(15, 23, 42);
+    inv.items.forEach((it, idx) => {
+      if (y > 250) { doc.addPage(); y = 20; }
+      if (idx % 2 === 1) {
+        doc.setFillColor(248, 250, 252);
+        doc.rect(m, y - 5, pageW - 2 * m, 9, 'F');
+      }
+      doc.setFontSize(10);
+      doc.text(String(it.name).substring(0, 40), m + 3, y);
+      doc.text(String(it.qty), m + 95, y);
+      doc.text(money(it.price), m + 120, y);
+      doc.setFont('helvetica', 'bold');
+      doc.text(money(it.price * it.qty), pageW - m - 3, y, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      y += 9;
     });
 
     y += 4;
-    doc.setDrawColor(200);
-    doc.line(m, y, m + 178, y);
-    y += 8;
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.4);
+    doc.line(m, y, pageW - m, y);
+    y += 10;
+
+    // Totals box
+    const boxX = pageW / 2;
+    doc.setFillColor(248, 250, 252);
+    doc.roundedRect(boxX, y - 4, pageW - m - boxX, 28, 3, 3, 'F');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    doc.text('Subtotal', boxX + 6, y + 4);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${settings.currency} ${money(inv.total)}`, pageW - m - 4, y + 4, { align: 'right' });
+    doc.setTextColor(100);
+    doc.text('Paid', boxX + 6, y + 11);
+    doc.setTextColor(16, 185, 129);
+    doc.text(`${settings.currency} ${money(paid)}`, pageW - m - 4, y + 11, { align: 'right' });
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
-    doc.text(`Total: ${settings.currency} ${money(inv.total)}`, m + 110, y);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Total', boxX + 6, y + 20);
+    doc.setTextColor(13, 148, 136);
+    doc.text(`${settings.currency} ${money(inv.total)}`, pageW - m - 4, y + 20, { align: 'right' });
+    y += 36;
 
     if (settings.taxId) {
-      y += 10;
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8);
       doc.setTextColor(120);
-      doc.text(`Tax / NTN: ${settings.taxId}`, m, y);
+      doc.text(`Tax / NTN / GST: ${settings.taxId}`, m, y);
+      y += 6;
     }
-
-    y += 12;
-    doc.setFontSize(8);
-    doc.setTextColor(150);
+    doc.setFontSize(9);
+    doc.setTextColor(13, 148, 136);
+    doc.setFont('helvetica', 'bold');
     doc.text('Thank you for your business!', m, y);
+    y += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(150);
+    doc.setFontSize(8);
+    doc.text('Generated by StockBill', m, y);
 
     doc.save(`Invoice-${inv.number}.pdf`);
     toast('PDF downloaded');
   }
 
   async function shareInvoiceImage(inv) {
-    // Build a clean invoice card in a hidden div, capture with html2canvas
+    const paid = inv.paidAmount || 0;
+    const due = Math.max(0, (inv.total || 0) - paid);
+    const statusText = due <= 0 ? 'PAID' : (paid > 0 ? 'PARTIAL' : 'UNPAID');
+    const statusColor = due <= 0 ? '#10B981' : (paid > 0 ? '#F59E0B' : '#EF4444');
+
     const card = document.createElement('div');
-    card.className = 'invoice-card-preview';
-    card.style.cssText = 'position:fixed;left:-9999px;top:0;width:360px;background:#fff;padding:24px;font-family:Inter,system-ui,sans-serif;color:#0F172A;';
+    card.style.cssText = 'position:fixed;left:-9999px;top:0;width:380px;background:#fff;font-family:Inter,system-ui,sans-serif;color:#0F172A;border-radius:16px;overflow:hidden;';
     card.innerHTML = `
-      <div style="background:#0D9488;color:#fff;padding:16px 20px;margin:-24px -24px 20px;border-radius:0;display:flex;align-items:center;gap:12px;">
-        ${settings.logo ? `<img src="${settings.logo}" style="width:40px;height:40px;border-radius:8px;object-fit:contain;background:#fff;" />` : ''}
-        <div>
-          <div style="font-size:18px;font-weight:700;">${escapeHtml(settings.businessName)}</div>
-          <div style="font-size:12px;opacity:0.9;margin-top:4px;">${escapeHtml([settings.phone, settings.city].filter(Boolean).join(' · '))}</div>
+      <div style="background:linear-gradient(135deg,#0D9488,#0F766E);color:#fff;padding:20px 22px;display:flex;align-items:center;gap:14px;">
+        ${settings.logo ? `<div style="width:48px;height:48px;border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0"><img src="${settings.logo}" style="width:44px;height:44px;object-fit:contain"/></div>` : ''}
+        <div style="flex:1;min-width:0">
+          <div style="font-size:18px;font-weight:700;letter-spacing:-0.02em">${escapeHtml(settings.businessName)}</div>
+          <div style="font-size:11px;opacity:0.9;margin-top:3px">${escapeHtml([settings.phone, settings.city].filter(Boolean).join(' · '))}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:10px;font-weight:700;opacity:0.85;letter-spacing:0.06em">INVOICE</div>
+          <div style="font-size:13px;font-weight:600">${escapeHtml(inv.number)}</div>
         </div>
       </div>
-      <div style="font-size:15px;font-weight:700;margin-bottom:4px;">Invoice ${escapeHtml(inv.number)}</div>
-      <div style="font-size:12px;color:#64748B;margin-bottom:16px;">${formatDate(inv.date)}</div>
-      <div style="font-size:13px;margin-bottom:4px;"><strong>Bill To:</strong> ${escapeHtml(inv.customerName || 'Walk-in')}</div>
-      ${inv.customerPhone ? `<div style="font-size:12px;color:#64748B;margin-bottom:16px;">${escapeHtml(inv.customerPhone)}</div>` : '<div style="margin-bottom:16px;"></div>'}
-      <div style="border-top:1px solid #E2E8F0;padding-top:12px;">
-        ${inv.items.map(it => `
-          <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px;">
-            <span>${escapeHtml(it.name)} × ${it.qty}</span>
-            <span style="font-weight:600;">${settings.currency} ${money(it.price * it.qty)}</span>
-          </div>`).join('')}
+      <div style="padding:18px 22px 8px;display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <div style="font-size:10px;color:#94A3B8;font-weight:600;letter-spacing:0.04em">BILL TO</div>
+          <div style="font-size:15px;font-weight:700;margin-top:2px">${escapeHtml(inv.customerName || 'Walk-in')}</div>
+          ${inv.customerPhone ? `<div style="font-size:12px;color:#64748B;margin-top:2px">${escapeHtml(inv.customerPhone)}</div>` : ''}
+          <div style="font-size:11px;color:#94A3B8;margin-top:4px">${formatDate(inv.date)}</div>
+        </div>
+        <div style="background:${statusColor};color:#fff;font-size:11px;font-weight:700;padding:5px 10px;border-radius:8px;letter-spacing:0.04em">${statusText}</div>
       </div>
-      <div style="border-top:2px solid #0D9488;margin-top:12px;padding-top:12px;display:flex;justify-content:space-between;font-size:16px;font-weight:700;">
-        <span>Total</span><span>${settings.currency} ${money(inv.total)}</span>
+      <div style="padding:8px 22px 4px">
+        <div style="background:#F8FAFC;border-radius:10px;padding:10px 12px">
+          <div style="display:flex;font-size:10px;color:#94A3B8;font-weight:600;margin-bottom:8px">
+            <span style="flex:1">ITEM</span><span style="width:36px;text-align:center">QTY</span><span style="width:72px;text-align:right">AMOUNT</span>
+          </div>
+          ${inv.items.map(it => `
+            <div style="display:flex;align-items:center;font-size:13px;padding:6px 0;border-top:1px solid #F1F5F9">
+              <span style="flex:1;font-weight:500">${escapeHtml(it.name)}</span>
+              <span style="width:36px;text-align:center;color:#64748B">${it.qty}</span>
+              <span style="width:72px;text-align:right;font-weight:600">${settings.currency} ${money(it.price * it.qty)}</span>
+            </div>`).join('')}
+        </div>
       </div>
-      ${settings.taxId ? `<div style="font-size:11px;color:#94A3B8;margin-top:16px;">Tax/NTN: ${escapeHtml(settings.taxId)}</div>` : ''}
-      <div style="font-size:11px;color:#94A3B8;margin-top:8px;text-align:center;">Thank you!</div>
+      <div style="padding:12px 22px 20px">
+        <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748B;margin-bottom:4px">
+          <span>Paid</span><span style="color:#10B981;font-weight:600">${settings.currency} ${money(paid)}</span>
+        </div>
+        ${due > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;color:#64748B;margin-bottom:8px">
+          <span>Due</span><span style="color:#EF4444;font-weight:600">${settings.currency} ${money(due)}</span>
+        </div>` : ''}
+        <div style="display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,#CCFBF1,#F0FDFA);border-radius:12px;padding:12px 14px;margin-top:6px">
+          <span style="font-weight:700;font-size:14px">Total</span>
+          <span style="font-weight:800;font-size:18px;color:#0F766E">${settings.currency} ${money(inv.total)}</span>
+        </div>
+        <div style="text-align:center;font-size:11px;color:#94A3B8;margin-top:14px">Thank you for your business!</div>
+      </div>
     `;
     document.body.appendChild(card);
 
@@ -1296,21 +1452,15 @@
       canvas.toBlob(async (blob) => {
         if (!blob) { toast('Could not create image'); return; }
         const file = new File([blob], `Invoice-${inv.number}.png`, { type: 'image/png' });
-
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
           try {
-            await navigator.share({
-              files: [file],
-              title: `Invoice ${inv.number}`,
-              text: `Invoice from ${settings.businessName}`
-            });
+            await navigator.share({ files: [file], title: `Invoice ${inv.number}`, text: `Invoice from ${settings.businessName}` });
             toast('Shared');
             return;
           } catch (err) {
             if (err.name === 'AbortError') return;
           }
         }
-        // Fallback: download image
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1320,7 +1470,7 @@
         toast('Image saved – share it on WhatsApp');
       }, 'image/png');
     } catch (err) {
-      document.body.removeChild(card);
+      if (card.parentNode) document.body.removeChild(card);
       console.error(err);
       toast('Image generation failed');
     }
@@ -1685,13 +1835,48 @@
         break;
       case 'stop-scanner': stopScanner(); break;
       case 'export-data': {
-        const data = { products, invoices, customers, suppliers, settings, invoiceCounter, exportedAt: new Date().toISOString() };
+        const data = { products, invoices, customers, suppliers, expenses, stockMovements, settings, invoiceCounter, exportedAt: new Date().toISOString() };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = `stockbill-backup-${new Date().toISOString().slice(0,10)}.json`;
         a.click();
         toast('Backup downloaded');
+        break;
+      }
+      case 'import-data': {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/json,.json';
+        input.onchange = () => {
+          const file = input.files && input.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            try {
+              const data = JSON.parse(reader.result);
+              if (!data || typeof data !== 'object') throw new Error('Invalid');
+              if (confirm('Replace current data with this backup?')) {
+                if (Array.isArray(data.products)) products = data.products;
+                if (Array.isArray(data.invoices)) invoices = data.invoices;
+                if (Array.isArray(data.customers)) customers = data.customers;
+                if (Array.isArray(data.suppliers)) suppliers = data.suppliers;
+                if (Array.isArray(data.expenses)) expenses = data.expenses;
+                if (Array.isArray(data.stockMovements)) stockMovements = data.stockMovements;
+                if (data.settings) settings = Object.assign({}, settings, data.settings);
+                if (data.invoiceCounter) invoiceCounter = data.invoiceCounter;
+                persist();
+                migrateData();
+                toast('Backup restored');
+                setView('dashboard');
+              }
+            } catch (err) {
+              toast('Invalid backup file');
+            }
+          };
+          reader.readAsText(file);
+        };
+        input.click();
         break;
       }
       case 'clear-data':
@@ -1734,7 +1919,7 @@
       ).sort((a,b) => a.name.localeCompare(b.name));
       const list = $('#customerList');
       if (list) list.innerHTML = filtered.map(c => {
-        const bal = customerBalance(c.id, c.name);
+        const bal = customerBalance(c.id, c.name, c.phone);
         const dueHtml = bal.due > 0
           ? `<span class="list-item-badge badge-out">Due ${settings.currency} ${money(bal.due)}</span>`
           : (bal.total > 0 ? `<span class="list-item-badge badge-ok">Clear</span>` : '');
@@ -1757,5 +1942,6 @@
   });
 
   // Init
+  migrateData();
   setView('dashboard');
 })();
