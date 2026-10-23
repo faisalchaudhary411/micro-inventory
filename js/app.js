@@ -73,6 +73,20 @@
   }
 
   // Custom dropdown helper (searchable, matches app design)
+
+  function customerBalance(customerId, customerName) {
+    let due = 0, paid = 0, total = 0;
+    invoices.forEach(inv => {
+      const match = (customerId && inv.customerId === customerId) ||
+        (!customerId && customerName && (inv.customerName || '').toLowerCase() === customerName.toLowerCase());
+      if (!match) return;
+      total += inv.total || 0;
+      paid += inv.paidAmount || 0;
+      due += Math.max(0, (inv.total || 0) - (inv.paidAmount || 0));
+    });
+    return { due, paid, total };
+  }
+
   function customSelect(name, options, selectedValue, placeholder, searchable) {
     const selected = options.find(o => o.value === selectedValue) || options[0];
     const label = selected ? selected.label : (placeholder || 'Select...');
@@ -269,32 +283,46 @@
     const available = products.filter(p => p.stock > 0);
     const customerOptions = [
       { value: '', label: 'Walk-in Customer' },
-      ...customers.map(c => ({
-        value: c.id,
-        label: c.name + (c.phone ? ' · ' + c.phone : '')
-      }))
+      ...customers.map(c => {
+        const bal = customerBalance(c.id, c.name);
+        const debt = bal.due > 0 ? ` · Due ${settings.currency} ${money(bal.due)}` : '';
+        return { value: c.id, label: c.name + (c.phone ? ' · ' + c.phone : '') + debt };
+      })
     ];
     return `<div class="fade-in">
       <form id="invoiceForm">
         <div class="form-group">
-          <label class="form-label">Customer</label>
+          <label class="form-label">Customer (searchable)</label>
           ${customSelect('customerId', customerOptions, '', 'Walk-in Customer', true)}
         </div>
         <div class="form-group">
-          <label class="form-label">Or type name / phone</label>
+          <label class="form-label">Or type name</label>
           <input type="text" class="form-input" name="customerName" id="customerNameInput" placeholder="Customer name" />
         </div>
         <div class="form-group">
           <input type="tel" class="form-input" name="customerPhone" id="customerPhoneInput" placeholder="Phone (optional)" />
         </div>
-        <div class="section-header mt-16"><h2 class="section-title">Products</h2></div>
+
+        <div class="section-header mt-16">
+          <h2 class="section-title">Products</h2>
+        </div>
+        <div class="search-wrap mb-8">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="search" class="search-input" id="invoiceProductSearch" placeholder="Search products..." />
+        </div>
+        <div class="form-group">
+          <div class="input-with-btn">
+            <input type="text" class="form-input" id="invoiceBarcodeInput" placeholder="Scan or type barcode" />
+            <button type="button" class="btn btn-secondary btn-sm" style="height:48px;padding:0 12px" data-action="scan-invoice-barcode">Scan</button>
+          </div>
+        </div>
         <div id="invoiceProducts">
           ${available.length === 0 ? '<div class="card text-center text-secondary" style="padding:24px">All products are out of stock</div>' :
             available.map(p => `
-              <div class="invoice-product-row" data-id="${p.id}">
+              <div class="invoice-product-row" data-id="${p.id}" data-name="${escapeHtml(p.name.toLowerCase())}" data-barcode="${escapeHtml((p.barcode || '').toLowerCase())}">
                 <div style="flex:1;min-width:0">
                   <div class="font-semibold">${escapeHtml(p.name)}</div>
-                  <div class="text-sm text-secondary">${settings.currency} ${money(p.price)} · Stock: ${p.stock}</div>
+                  <div class="text-sm text-secondary">${settings.currency} ${money(p.price)} · Stock: ${p.stock}${p.barcode ? ' · ' + escapeHtml(p.barcode) : ''}</div>
                 </div>
                 <div class="qty-control">
                   <button type="button" class="qty-btn" data-qty="-1" data-id="${p.id}">−</button>
@@ -308,16 +336,14 @@
         </div>
 
         <div class="section-header mt-20"><h2 class="section-title">Payment</h2></div>
-        <div class="form-group">
-          <label class="form-label">Status</label>
-          ${customSelect('paymentStatus', [
-            { value: 'unpaid', label: 'Unpaid' },
-            { value: 'partial', label: 'Advance / Partial' },
-            { value: 'paid', label: 'Fully Paid' }
-          ], 'unpaid')}
+        <div class="payment-status-row" id="paymentStatusRow">
+          <button type="button" class="pay-chip active" data-pay="unpaid">Unpaid</button>
+          <button type="button" class="pay-chip" data-pay="partial">Advance</button>
+          <button type="button" class="pay-chip" data-pay="paid">Fully Paid</button>
         </div>
-        <div class="form-group" id="paidAmountGroup" style="display:none">
-          <label class="form-label">Amount Paid (${settings.currency})</label>
+        <input type="hidden" name="paymentStatus" id="paymentStatusInput" value="unpaid" />
+        <div class="form-group mt-12" id="paidAmountGroup" style="display:none">
+          <label class="form-label">Advance / Amount Paid (${settings.currency})</label>
           <input type="number" class="form-input" name="paidAmount" id="paidAmountInput" min="0" step="0.01" placeholder="0" />
         </div>
 
@@ -328,6 +354,8 @@
 
   function bindCreateInvoice() {
     const qtyMap = {};
+    window._invoiceQtyMap = qtyMap;
+
     function update() {
       let total = 0, has = false;
       Object.entries(qtyMap).forEach(([id, qty]) => {
@@ -342,24 +370,71 @@
       if (tot) tot.textContent = `${settings.currency} ${money(total)}`;
       if (btn) btn.disabled = !has;
     }
+    window._invoiceUpdate = update;
 
-    $$('.qty-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+    function setQty(id, q) {
+      const p = products.find(x => x.id === id);
+      if (!p) return;
+      if (q < 0) q = 0;
+      if (q > p.stock) { toast('Not enough stock'); q = p.stock; }
+      qtyMap[id] = q;
+      const el = document.getElementById('qty-' + id);
+      if (el) el.textContent = q;
+      update();
+    }
+    window._invoiceSetQty = setQty;
+
+    document.querySelectorAll('#invoiceProducts .qty-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         const id = btn.dataset.id;
         const delta = parseInt(btn.dataset.qty, 10);
-        const p = products.find(x => x.id === id);
-        if (!p) return;
-        let q = (qtyMap[id] || 0) + delta;
-        if (q < 0) q = 0;
-        if (q > p.stock) { toast('Not enough stock'); return; }
-        qtyMap[id] = q;
-        const el = $(`#qty-${id}`);
-        if (el) el.textContent = q;
-        update();
+        setQty(id, (qtyMap[id] || 0) + delta);
       });
     });
 
-    // Customer custom-select change is handled via global click delegation
+    // Payment chips
+    document.querySelectorAll('.pay-chip').forEach(chip => {
+      chip.addEventListener('click', (e) => {
+        e.preventDefault();
+        document.querySelectorAll('.pay-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        const val = chip.dataset.pay;
+        const hidden = $('#paymentStatusInput');
+        if (hidden) hidden.value = val;
+        const grp = $('#paidAmountGroup');
+        if (grp) grp.style.display = val === 'partial' ? 'block' : 'none';
+        if (val === 'paid') {
+          // will set full amount on submit
+        }
+      });
+    });
+
+    // Product search on invoice
+    const pSearch = $('#invoiceProductSearch');
+    if (pSearch) {
+      pSearch.addEventListener('input', () => {
+        const q = pSearch.value.trim().toLowerCase();
+        document.querySelectorAll('.invoice-product-row').forEach(row => {
+          const name = row.dataset.name || '';
+          const barcode = row.dataset.barcode || '';
+          row.style.display = (!q || name.includes(q) || barcode.includes(q)) ? '' : 'none';
+        });
+      });
+    }
+
+    // Barcode enter key
+    const bcInput = $('#invoiceBarcodeInput');
+    if (bcInput) {
+      bcInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addProductByBarcode(bcInput.value.trim());
+          bcInput.value = '';
+        }
+      });
+    }
 
     $('#invoiceForm').addEventListener('submit', e => {
       e.preventDefault();
@@ -378,13 +453,21 @@
       });
       if (!items.length) { toast('Select at least one product'); return; }
 
-      const paymentStatus = fd.get('paymentStatus') || 'unpaid';
+      let paymentStatus = (fd.get('paymentStatus') || $('#paymentStatusInput')?.value || 'unpaid');
       let paidAmount = parseFloat(fd.get('paidAmount')) || 0;
       if (paymentStatus === 'paid') paidAmount = total;
       if (paymentStatus === 'unpaid') paidAmount = 0;
       if (paidAmount > total) paidAmount = total;
+      if (paymentStatus === 'partial' && paidAmount <= 0) {
+        toast('Enter advance amount');
+        return;
+      }
+      if (paymentStatus === 'partial' && paidAmount >= total) {
+        paymentStatus = 'paid';
+        paidAmount = total;
+      }
 
-      // Log stock out movements
+      const invNumber = `${settings.invoicePrefix || 'INV'}-${invoiceCounter++}`;
       items.forEach(it => {
         stockMovements.unshift({
           id: uid(),
@@ -393,16 +476,39 @@
           type: 'out',
           qty: it.qty,
           date: new Date().toISOString(),
-          note: `Invoice ${settings.invoicePrefix || 'INV'}-${invoiceCounter}`
+          note: `Invoice ${invNumber}`
         });
       });
 
+      let customerId = fd.get('customerId') || '';
+      let customerName = (fd.get('customerName') || '').trim();
+      let customerPhone = (fd.get('customerPhone') || '').trim();
+      if (customerId) {
+        const c = customers.find(x => x.id === customerId);
+        if (c) {
+          if (!customerName) customerName = c.name;
+          if (!customerPhone) customerPhone = c.phone || '';
+        }
+      }
+      if (!customerName) customerName = 'Walk-in Customer';
+
+      // Auto-create customer if typed new name with phone
+      if (!customerId && customerName !== 'Walk-in Customer') {
+        const existing = customers.find(c => c.name.toLowerCase() === customerName.toLowerCase());
+        if (existing) {
+          customerId = existing.id;
+        } else if (customerPhone) {
+          customerId = uid();
+          customers.push({ id: customerId, name: customerName, phone: customerPhone, address: '', notes: '' });
+        }
+      }
+
       const inv = {
         id: uid(),
-        number: `${settings.invoicePrefix || 'INV'}-${invoiceCounter++}`,
-        customerId: fd.get('customerId') || null,
-        customerName: (fd.get('customerName') || '').trim() || 'Walk-in Customer',
-        customerPhone: (fd.get('customerPhone') || '').trim(),
+        number: invNumber,
+        customerId: customerId || null,
+        customerName,
+        customerPhone,
         items, total,
         paymentStatus,
         paidAmount,
@@ -410,12 +516,24 @@
       };
       invoices.unshift(inv);
       persist();
-      toast('Invoice created');
+      toast(paymentStatus === 'paid' ? 'Invoice created (Paid)' : paymentStatus === 'partial' ? 'Invoice created (Advance recorded)' : 'Invoice created (Unpaid)');
       openInvoiceDetail(inv);
     });
   }
 
-  // ---------- Customers ----------
+  function addProductByBarcode(code) {
+    if (!code) return;
+    const p = products.find(x => (x.barcode || '').toLowerCase() === code.toLowerCase());
+    if (!p) { toast('Product not found for barcode'); return; }
+    if (p.stock <= 0) { toast('Out of stock'); return; }
+    const qtyMap = window._invoiceQtyMap || {};
+    const cur = qtyMap[p.id] || 0;
+    if (cur >= p.stock) { toast('Not enough stock'); return; }
+    if (window._invoiceSetQty) window._invoiceSetQty(p.id, cur + 1);
+    else toast('Open New Invoice first');
+    toast('+1 ' + p.name);
+  }
+
   function viewCustomers() {
     if (customers.length === 0) {
       return emptyState('user', 'No customers yet', 'Save customer details for faster invoicing.', 'Add Customer', null, 'add-customer');
@@ -426,16 +544,69 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="search" class="search-input" id="customerSearch" placeholder="Search customers..." />
       </div>
-      <div class="list" id="customerList">${sorted.map(c => `
-        <div class="list-item" data-action="edit-customer" data-id="${c.id}">
+      <div class="list" id="customerList">${sorted.map(c => {
+        const bal = customerBalance(c.id, c.name);
+        const dueHtml = bal.due > 0
+          ? `<span class="list-item-badge badge-out">Due ${settings.currency} ${money(bal.due)}</span>`
+          : (bal.total > 0 ? `<span class="list-item-badge badge-ok">Clear</span>` : '');
+        return `
+        <div class="list-item" data-action="view-customer" data-id="${c.id}">
           <div class="list-item-icon">${initials(c.name)}</div>
           <div class="list-item-body">
             <div class="list-item-title">${escapeHtml(c.name)}</div>
-            <div class="list-item-sub">${escapeHtml(c.phone || 'No phone')}${c.address ? ' · ' + escapeHtml(c.address) : ''}</div>
+            <div class="list-item-sub">${escapeHtml(c.phone || 'No phone')}</div>
+            ${dueHtml}
           </div>
-        </div>`).join('')}</div>
+          <div class="list-item-right">
+            <div class="list-item-price">${bal.total ? settings.currency + ' ' + money(bal.total) : '—'}</div>
+          </div>
+        </div>`;
+      }).join('')}</div>
     </div>`;
   }
+
+  function openCustomerDetail(cust) {
+    const bal = customerBalance(cust.id, cust.name);
+    const custInvoices = invoices.filter(inv =>
+      inv.customerId === cust.id || (inv.customerName || '').toLowerCase() === (cust.name || '').toLowerCase()
+    ).sort((a,b) => new Date(b.date) - new Date(a.date));
+
+    $('#modalRoot').innerHTML = `
+      <div class="modal-overlay">
+        <div class="modal-sheet">
+          <div class="modal-handle"></div>
+          <div class="modal-header">
+            <h3 class="modal-title">${escapeHtml(cust.name)}</h3>
+            <button class="modal-close" data-action="close-modal"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          </div>
+          <div class="text-sm text-secondary mb-8">${escapeHtml(cust.phone || '')}${cust.address ? ' · ' + escapeHtml(cust.address) : ''}</div>
+          <div class="stats-grid mb-16">
+            <div class="stat-card"><div class="stat-label">Total Sales</div><div class="stat-value primary">${settings.currency} ${money(bal.total)}</div></div>
+            <div class="stat-card"><div class="stat-label">Due / Credit</div><div class="stat-value ${bal.due > 0 ? 'danger' : 'success'}">${settings.currency} ${money(bal.due)}</div></div>
+          </div>
+          <div class="section-header"><h2 class="section-title">Invoice history</h2></div>
+          ${custInvoices.length === 0 ? '<div class="text-secondary text-sm">No invoices yet</div>' :
+            `<div class="list">${custInvoices.map(inv => {
+              const due = Math.max(0, (inv.total||0) - (inv.paidAmount||0));
+              const st = due <= 0 ? 'Paid' : (inv.paidAmount > 0 ? 'Partial' : 'Unpaid');
+              return `<div class="list-item" data-action="view-invoice" data-id="${inv.id}">
+                <div class="list-item-body">
+                  <div class="list-item-title">${escapeHtml(inv.number)}</div>
+                  <div class="list-item-sub">${formatDate(inv.date)} · ${st}</div>
+                </div>
+                <div class="list-item-right">
+                  <div class="list-item-price">${settings.currency} ${money(inv.total)}</div>
+                  ${due > 0 ? `<span class="list-item-badge badge-out">Due ${money(due)}</span>` : `<span class="list-item-badge badge-ok">Paid</span>`}
+                </div>
+              </div>`;
+            }).join('')}</div>`}
+          <div class="flex gap-12 mt-20">
+            <button class="btn btn-secondary btn-block" data-action="edit-customer" data-id="${cust.id}">Edit</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
 
   // ---------- Suppliers ----------
   function viewSuppliers() {
@@ -1277,12 +1448,24 @@
           render();
         }
         break;
+      case 'view-customer': {
+        const c = customers.find(x => x.id === id);
+        if (c) openCustomerDetail(c);
+        break;
+      }
       case 'add-customer': openCustomerModal(); break;
       case 'edit-customer': {
         const c = customers.find(x => x.id === id);
-        if (c) openCustomerModal(c);
+        if (c) { closeModal(); openCustomerModal(c); }
         break;
       }
+      case 'scan-invoice-barcode':
+        startScanner(code => {
+          addProductByBarcode(code);
+          const inp = $('#invoiceBarcodeInput');
+          if (inp) inp.value = code;
+        });
+        break;
       case 'delete-customer':
         if (confirm('Delete this customer?')) {
           customers = customers.filter(c => c.id !== editingId);
@@ -1550,14 +1733,21 @@
         c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)
       ).sort((a,b) => a.name.localeCompare(b.name));
       const list = $('#customerList');
-      if (list) list.innerHTML = filtered.map(c => `
-        <div class="list-item" data-action="edit-customer" data-id="${c.id}">
+      if (list) list.innerHTML = filtered.map(c => {
+        const bal = customerBalance(c.id, c.name);
+        const dueHtml = bal.due > 0
+          ? `<span class="list-item-badge badge-out">Due ${settings.currency} ${money(bal.due)}</span>`
+          : (bal.total > 0 ? `<span class="list-item-badge badge-ok">Clear</span>` : '');
+        return `<div class="list-item" data-action="view-customer" data-id="${c.id}">
           <div class="list-item-icon">${initials(c.name)}</div>
           <div class="list-item-body">
             <div class="list-item-title">${escapeHtml(c.name)}</div>
             <div class="list-item-sub">${escapeHtml(c.phone || 'No phone')}</div>
+            ${dueHtml}
           </div>
-        </div>`).join('') || '<div class="text-center text-secondary" style="padding:32px 0">No customers found</div>';
+          <div class="list-item-right"><div class="list-item-price">${bal.total ? settings.currency + ' ' + money(bal.total) : '—'}</div></div>
+        </div>`;
+      }).join('') || '<div class="text-center text-secondary" style="padding:32px 0">No customers found</div>';
     }
   });
 
