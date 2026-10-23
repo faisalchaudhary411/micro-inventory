@@ -1,5 +1,5 @@
 /* ============================================
-   StockBill v2 – Full Inventory + Invoicing
+   Hisably v2 – Full Inventory + Invoicing
    ============================================ */
 
 (function () {
@@ -43,7 +43,9 @@
     currency: 'PKR',
     invoicePrefix: 'INV',
     lowStockDefault: 5,
-    logo: ''
+    logo: '',
+    paymentQr: '',
+    paymentNote: 'Pay via JazzCash / EasyPaisa / Bank'
   });
   let invoiceCounter = load(STORAGE.counter, 1001);
 
@@ -836,7 +838,7 @@
           <svg class="menu-item-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
-      <div class="text-center text-secondary text-sm mt-20">StockBill · Data stays on this device</div>
+      <div class="text-center text-secondary text-sm mt-20">Hisably · Data stays on this device</div>
     </div>`;
   }
 
@@ -1119,6 +1121,18 @@
               </div>
               <input type="hidden" name="logo" id="logoValue" value="" />
             </div>
+            <div class="form-group">
+              <label class="form-label">Payment QR Code (JazzCash / EasyPaisa / Bank)</label>
+              <div class="logo-upload-row">
+                <div class="logo-preview" id="qrPreview">${settings.paymentQr ? `<img src="${settings.paymentQr}" alt="QR" />` : '<span>No QR</span>'}</div>
+                <div style="flex:1">
+                  <input type="file" id="qrFile" accept="image/*" style="display:none" />
+                  <button type="button" class="btn btn-secondary btn-sm" data-action="pick-qr">Upload QR</button>
+                  ${settings.paymentQr ? `<button type="button" class="btn btn-ghost btn-sm" data-action="remove-qr" style="margin-left:8px">Remove</button>` : ''}
+                </div>
+              </div>
+              <input type="text" class="form-input mt-8" name="paymentNote" value="${escapeHtml(settings.paymentNote || 'Pay via JazzCash / EasyPaisa / Bank')}" placeholder="Payment note on invoice" />
+            </div>
             <div class="form-group"><label class="form-label">Owner Name</label><input class="form-input" name="ownerName" value="${escapeHtml(settings.ownerName || '')}" /></div>
             <div class="form-row">
               <div class="form-group"><label class="form-label">Phone</label><input class="form-input" name="phone" type="tel" value="${escapeHtml(settings.phone || '')}" /></div>
@@ -1159,7 +1173,8 @@
       settings.taxId = fd.get('taxId').trim();
       settings.currency = fd.get('currency');
       settings.invoicePrefix = fd.get('invoicePrefix').trim() || 'INV';
-      // logo is updated live via pick/remove actions
+      settings.paymentNote = (fd.get('paymentNote') || '').trim() || 'Pay via JazzCash / EasyPaisa / Bank';
+      // logo / paymentQr updated live via pick/remove actions
       persist();
       toast('Settings saved');
       closeModal();
@@ -1229,160 +1244,176 @@
   function generatePDF(inv) {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-    const pageW = 210;
-    const m = 18;
-    let y = 0;
+    const W = 210, m = 16;
     const paid = inv.paidAmount || 0;
     const due = Math.max(0, (inv.total || 0) - paid);
     const statusText = due <= 0 ? 'PAID' : (paid > 0 ? 'PARTIAL' : 'UNPAID');
+    let y = 0;
 
-    // Top accent
+    // Header band
     doc.setFillColor(13, 148, 136);
-    doc.rect(0, 0, pageW, 42, 'F');
-    // subtle bottom strip
-    doc.setFillColor(15, 118, 110);
-    doc.rect(0, 40, pageW, 2, 'F');
+    doc.rect(0, 0, W, 36, 'F');
 
-    doc.setTextColor(255, 255, 255);
     let textX = m;
     if (settings.logo) {
       try {
         doc.setFillColor(255, 255, 255);
-        doc.roundedRect(m, 8, 22, 22, 3, 3, 'F');
-        doc.addImage(settings.logo, 'PNG', m + 2, 10, 18, 18);
-        textX = m + 28;
+        doc.roundedRect(m, 7, 22, 22, 3, 3, 'F');
+        doc.addImage(settings.logo, 'PNG', m + 2, 9, 18, 18);
+        textX = m + 26;
       } catch (e) {}
     }
+    doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(18);
-    doc.text(settings.businessName || 'Invoice', textX, 18);
+    doc.setFontSize(16);
+    doc.text(settings.businessName || 'Business', textX, 16);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    const sub = [settings.phone, settings.city, settings.address].filter(Boolean).join('  ·  ');
+    if (sub) doc.text(sub.substring(0, 70), textX, 23);
+    if (settings.email) doc.text(settings.email, textX, 28);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text('INVOICE', W - m, 14, { align: 'right' });
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
-    const sub = [settings.phone, settings.email, settings.city].filter(Boolean).join('  ·  ');
-    if (sub) doc.text(sub, textX, 26);
-    if (settings.address) doc.text(String(settings.address).substring(0, 50), textX, 32);
+    doc.text(String(inv.number), W - m, 20, { align: 'right' });
+    doc.text(formatDate(inv.date), W - m, 26, { align: 'right' });
 
-    // INVOICE badge on right
+    y = 46;
+    // Bill to + status
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.text('INVOICE', pageW - m, 16, { align: 'right' });
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-    doc.text(String(inv.number), pageW - m, 23, { align: 'right' });
-    doc.text(formatDate(inv.date), pageW - m, 30, { align: 'right' });
-
-    y = 54;
-    doc.setTextColor(15, 23, 42);
-
-    // Two columns: Bill To + Payment
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(100);
+    doc.setFontSize(7);
+    doc.setTextColor(148, 163, 184);
     doc.text('BILL TO', m, y);
-    doc.text('PAYMENT', pageW / 2 + 5, y);
-    y += 6;
+    y += 5;
     doc.setTextColor(15, 23, 42);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
     doc.text(inv.customerName || 'Walk-in Customer', m, y);
-    // Status pill
+    // status badge
     if (statusText === 'PAID') doc.setFillColor(16, 185, 129);
     else if (statusText === 'PARTIAL') doc.setFillColor(245, 158, 11);
     else doc.setFillColor(239, 68, 68);
-    doc.roundedRect(pageW / 2 + 5, y - 5, 28, 8, 2, 2, 'F');
+    const bw = statusText === 'PARTIAL' ? 22 : 18;
+    doc.roundedRect(W - m - bw, y - 5, bw, 7, 1.5, 1.5, 'F');
     doc.setTextColor(255, 255, 255);
-    doc.setFontSize(8);
+    doc.setFontSize(7);
     doc.setFont('helvetica', 'bold');
-    doc.text(statusText, pageW / 2 + 19, y, { align: 'center' });
+    doc.text(statusText, W - m - bw / 2, y - 0.5, { align: 'center' });
     y += 6;
-    doc.setTextColor(80);
+    doc.setTextColor(100);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-    if (inv.customerPhone) doc.text(inv.customerPhone, m, y);
-    doc.setTextColor(15, 23, 42);
-    doc.text(`Paid: ${settings.currency} ${money(paid)}`, pageW / 2 + 5, y);
-    y += 5;
-    if (due > 0) {
-      doc.setTextColor(185, 28, 28);
-      doc.setFont('helvetica', 'bold');
-      doc.text(`Due: ${settings.currency} ${money(due)}`, pageW / 2 + 5, y);
-    }
-    y += 12;
+    doc.setFontSize(9);
+    if (inv.customerPhone) { doc.text(inv.customerPhone, m, y); y += 5; }
+    y += 4;
 
     // Table header
     doc.setFillColor(241, 245, 249);
-    doc.roundedRect(m, y - 5, pageW - 2 * m, 10, 2, 2, 'F');
+    doc.roundedRect(m, y, W - 2 * m, 8, 1.5, 1.5, 'F');
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(71, 85, 105);
-    doc.text('ITEM', m + 3, y);
-    doc.text('QTY', m + 95, y);
-    doc.text('PRICE', m + 120, y);
-    doc.text('AMOUNT', pageW - m - 3, y, { align: 'right' });
-    y += 10;
+    doc.setFontSize(8);
+    doc.setTextColor(100);
+    doc.text('ITEM', m + 3, y + 5.5);
+    doc.text('QTY', m + 100, y + 5.5);
+    doc.text('PRICE', m + 125, y + 5.5);
+    doc.text('AMOUNT', W - m - 3, y + 5.5, { align: 'right' });
+    y += 12;
 
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
     inv.items.forEach((it, idx) => {
-      if (y > 250) { doc.addPage(); y = 20; }
+      if (y > 230) { doc.addPage(); y = 20; }
       if (idx % 2 === 1) {
         doc.setFillColor(248, 250, 252);
-        doc.rect(m, y - 5, pageW - 2 * m, 9, 'F');
+        doc.rect(m, y - 4, W - 2 * m, 8, 'F');
       }
-      doc.setFontSize(10);
-      doc.text(String(it.name).substring(0, 40), m + 3, y);
-      doc.text(String(it.qty), m + 95, y);
-      doc.text(money(it.price), m + 120, y);
-      doc.setFont('helvetica', 'bold');
-      doc.text(money(it.price * it.qty), pageW - m - 3, y, { align: 'right' });
+      doc.setFontSize(9);
       doc.setFont('helvetica', 'normal');
-      y += 9;
+      doc.text(String(it.name).substring(0, 38), m + 3, y);
+      doc.text(String(it.qty), m + 100, y);
+      doc.text(money(it.price), m + 125, y);
+      doc.setFont('helvetica', 'bold');
+      doc.text(money(it.price * it.qty), W - m - 3, y, { align: 'right' });
+      y += 8;
     });
 
     y += 4;
     doc.setDrawColor(226, 232, 240);
-    doc.setLineWidth(0.4);
-    doc.line(m, y, pageW - m, y);
-    y += 10;
+    doc.line(m, y, W - m, y);
+    y += 8;
 
-    // Totals box
-    const boxX = pageW / 2;
-    doc.setFillColor(248, 250, 252);
-    doc.roundedRect(boxX, y - 4, pageW - m - boxX, 28, 3, 3, 'F');
+    // Totals
+    const tx = W - m - 55;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
+    doc.setFontSize(9);
     doc.setTextColor(100);
-    doc.text('Subtotal', boxX + 6, y + 4);
+    doc.text('Subtotal', tx, y);
     doc.setTextColor(15, 23, 42);
-    doc.text(`${settings.currency} ${money(inv.total)}`, pageW - m - 4, y + 4, { align: 'right' });
+    doc.text(`${settings.currency} ${money(inv.total)}`, W - m, y, { align: 'right' });
+    y += 6;
     doc.setTextColor(100);
-    doc.text('Paid', boxX + 6, y + 11);
+    doc.text('Paid', tx, y);
     doc.setTextColor(16, 185, 129);
-    doc.text(`${settings.currency} ${money(paid)}`, pageW - m - 4, y + 11, { align: 'right' });
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(15, 23, 42);
-    doc.text('Total', boxX + 6, y + 20);
-    doc.setTextColor(13, 148, 136);
-    doc.text(`${settings.currency} ${money(inv.total)}`, pageW - m - 4, y + 20, { align: 'right' });
-    y += 36;
-
-    if (settings.taxId) {
+    doc.text(`${settings.currency} ${money(paid)}`, W - m, y, { align: 'right' });
+    y += 6;
+    if (due > 0) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      doc.setTextColor(120);
-      doc.text(`Tax / NTN / GST: ${settings.taxId}`, m, y);
+      doc.setTextColor(100);
+      doc.text('Due', tx, y);
+      doc.setTextColor(239, 68, 68);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${settings.currency} ${money(due)}`, W - m, y, { align: 'right' });
       y += 6;
     }
+    y += 2;
+    doc.setFillColor(204, 251, 241);
+    doc.roundedRect(tx - 4, y - 4, W - m - (tx - 4), 10, 2, 2, 'F');
+    doc.setTextColor(15, 118, 110);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text('Total', tx, y + 3);
+    doc.text(`${settings.currency} ${money(inv.total)}`, W - m, y + 3, { align: 'right' });
+    y += 16;
+
+    // Payment QR section
+    if (settings.paymentQr) {
+      try {
+        const qrSize = 32;
+        doc.setDrawColor(226, 232, 240);
+        doc.setFillColor(248, 250, 252);
+        doc.roundedRect(m, y, W - 2 * m, qrSize + 14, 3, 3, 'FD');
+        doc.addImage(settings.paymentQr, 'PNG', m + 6, y + 6, qrSize, qrSize);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(15, 23, 42);
+        doc.text('Scan to pay', m + qrSize + 12, y + 14);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.setTextColor(100);
+        doc.text(settings.paymentNote || 'Pay via JazzCash / EasyPaisa / Bank', m + qrSize + 12, y + 20);
+        if (settings.phone) doc.text('Contact: ' + settings.phone, m + qrSize + 12, y + 26);
+        y += qrSize + 18;
+      } catch (e) { y += 4; }
+    }
+
+    if (settings.taxId) {
+      doc.setFontSize(7);
+      doc.setTextColor(120);
+      doc.text('Tax / NTN / GST: ' + settings.taxId, m, y);
+      y += 5;
+    }
+    doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(13, 148, 136);
-    doc.setFont('helvetica', 'bold');
     doc.text('Thank you for your business!', m, y);
     y += 5;
     doc.setFont('helvetica', 'normal');
-    doc.setTextColor(150);
-    doc.setFontSize(8);
-    doc.text('Generated by StockBill', m, y);
+    doc.setFontSize(7);
+    doc.setTextColor(160);
+    doc.text('Generated by Hisably', m, y);
 
     doc.save(`Invoice-${inv.number}.pdf`);
     toast('PDF downloaded');
@@ -1395,54 +1426,62 @@
     const statusColor = due <= 0 ? '#10B981' : (paid > 0 ? '#F59E0B' : '#EF4444');
 
     const card = document.createElement('div');
-    card.style.cssText = 'position:fixed;left:-9999px;top:0;width:380px;background:#fff;font-family:Inter,system-ui,sans-serif;color:#0F172A;border-radius:16px;overflow:hidden;';
+    card.style.cssText = 'position:fixed;left:-9999px;top:0;width:400px;background:#fff;font-family:Inter,system-ui,sans-serif;color:#0F172A;border-radius:16px;overflow:hidden;';
     card.innerHTML = `
-      <div style="background:linear-gradient(135deg,#0D9488,#0F766E);color:#fff;padding:20px 22px;display:flex;align-items:center;gap:14px;">
-        ${settings.logo ? `<div style="width:48px;height:48px;border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0"><img src="${settings.logo}" style="width:44px;height:44px;object-fit:contain"/></div>` : ''}
+      <div style="background:linear-gradient(135deg,#0D9488,#0F766E);color:#fff;padding:18px 20px;display:flex;align-items:center;gap:12px;">
+        ${settings.logo ? `<div style="width:46px;height:46px;border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0"><img src="${settings.logo}" style="width:42px;height:42px;object-fit:contain"/></div>` : `<div style="width:46px;height:46px;border-radius:12px;background:#fff;color:#0D9488;font-weight:800;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0">H</div>`}
         <div style="flex:1;min-width:0">
-          <div style="font-size:18px;font-weight:700;letter-spacing:-0.02em">${escapeHtml(settings.businessName)}</div>
-          <div style="font-size:11px;opacity:0.9;margin-top:3px">${escapeHtml([settings.phone, settings.city].filter(Boolean).join(' · '))}</div>
+          <div style="font-size:17px;font-weight:700">${escapeHtml(settings.businessName)}</div>
+          <div style="font-size:11px;opacity:0.9;margin-top:2px">${escapeHtml([settings.phone, settings.city].filter(Boolean).join(' · '))}</div>
         </div>
         <div style="text-align:right">
-          <div style="font-size:10px;font-weight:700;opacity:0.85;letter-spacing:0.06em">INVOICE</div>
+          <div style="font-size:10px;font-weight:700;opacity:0.85;letter-spacing:0.05em">INVOICE</div>
           <div style="font-size:13px;font-weight:600">${escapeHtml(inv.number)}</div>
+          <div style="font-size:10px;opacity:0.85">${formatDate(inv.date)}</div>
         </div>
       </div>
-      <div style="padding:18px 22px 8px;display:flex;justify-content:space-between;align-items:flex-start">
+      <div style="padding:16px 20px 6px;display:flex;justify-content:space-between;align-items:flex-start">
         <div>
           <div style="font-size:10px;color:#94A3B8;font-weight:600;letter-spacing:0.04em">BILL TO</div>
           <div style="font-size:15px;font-weight:700;margin-top:2px">${escapeHtml(inv.customerName || 'Walk-in')}</div>
           ${inv.customerPhone ? `<div style="font-size:12px;color:#64748B;margin-top:2px">${escapeHtml(inv.customerPhone)}</div>` : ''}
-          <div style="font-size:11px;color:#94A3B8;margin-top:4px">${formatDate(inv.date)}</div>
         </div>
-        <div style="background:${statusColor};color:#fff;font-size:11px;font-weight:700;padding:5px 10px;border-radius:8px;letter-spacing:0.04em">${statusText}</div>
+        <div style="background:${statusColor};color:#fff;font-size:11px;font-weight:700;padding:5px 10px;border-radius:8px">${statusText}</div>
       </div>
-      <div style="padding:8px 22px 4px">
+      <div style="padding:8px 20px">
         <div style="background:#F8FAFC;border-radius:10px;padding:10px 12px">
-          <div style="display:flex;font-size:10px;color:#94A3B8;font-weight:600;margin-bottom:8px">
-            <span style="flex:1">ITEM</span><span style="width:36px;text-align:center">QTY</span><span style="width:72px;text-align:right">AMOUNT</span>
+          <div style="display:flex;font-size:10px;color:#94A3B8;font-weight:600;margin-bottom:6px">
+            <span style="flex:1">ITEM</span><span style="width:40px;text-align:center">QTY</span><span style="width:78px;text-align:right">AMOUNT</span>
           </div>
           ${inv.items.map(it => `
-            <div style="display:flex;align-items:center;font-size:13px;padding:6px 0;border-top:1px solid #F1F5F9">
+            <div style="display:flex;align-items:center;font-size:13px;padding:7px 0;border-top:1px solid #F1F5F9">
               <span style="flex:1;font-weight:500">${escapeHtml(it.name)}</span>
-              <span style="width:36px;text-align:center;color:#64748B">${it.qty}</span>
-              <span style="width:72px;text-align:right;font-weight:600">${settings.currency} ${money(it.price * it.qty)}</span>
+              <span style="width:40px;text-align:center;color:#64748B">${it.qty}</span>
+              <span style="width:78px;text-align:right;font-weight:600">${settings.currency} ${money(it.price * it.qty)}</span>
             </div>`).join('')}
         </div>
       </div>
-      <div style="padding:12px 22px 20px">
-        <div style="display:flex;justify-content:space-between;font-size:13px;color:#64748B;margin-bottom:4px">
-          <span>Paid</span><span style="color:#10B981;font-weight:600">${settings.currency} ${money(paid)}</span>
+      <div style="padding:4px 20px 8px">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+          <span style="color:#64748B">Paid</span><span style="color:#10B981;font-weight:600">${settings.currency} ${money(paid)}</span>
         </div>
-        ${due > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;color:#64748B;margin-bottom:8px">
-          <span>Due</span><span style="color:#EF4444;font-weight:600">${settings.currency} ${money(due)}</span>
+        ${due > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+          <span style="color:#64748B">Due</span><span style="color:#EF4444;font-weight:600">${settings.currency} ${money(due)}</span>
         </div>` : ''}
-        <div style="display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,#CCFBF1,#F0FDFA);border-radius:12px;padding:12px 14px;margin-top:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,#CCFBF1,#F0FDFA);border-radius:12px;padding:12px 14px;margin-top:4px">
           <span style="font-weight:700;font-size:14px">Total</span>
           <span style="font-weight:800;font-size:18px;color:#0F766E">${settings.currency} ${money(inv.total)}</span>
         </div>
-        <div style="text-align:center;font-size:11px;color:#94A3B8;margin-top:14px">Thank you for your business!</div>
       </div>
+      ${settings.paymentQr ? `
+      <div style="margin:8px 20px 16px;padding:12px;background:#F8FAFC;border-radius:12px;display:flex;align-items:center;gap:14px;border:1px solid #E2E8F0">
+        <img src="${settings.paymentQr}" style="width:72px;height:72px;border-radius:8px;object-fit:contain;background:#fff" />
+        <div>
+          <div style="font-size:13px;font-weight:700;color:#0F172A">Scan to pay</div>
+          <div style="font-size:11px;color:#64748B;margin-top:4px">${escapeHtml(settings.paymentNote || 'Pay via JazzCash / EasyPaisa / Bank')}</div>
+          ${settings.phone ? `<div style="font-size:11px;color:#64748B;margin-top:2px">${escapeHtml(settings.phone)}</div>` : ''}
+        </div>
+      </div>` : `<div style="text-align:center;font-size:11px;color:#94A3B8;padding:0 20px 16px">Thank you for your business!</div>`}
     `;
     document.body.appendChild(card);
 
@@ -1467,7 +1506,7 @@
         a.download = `Invoice-${inv.number}.png`;
         a.click();
         URL.revokeObjectURL(url);
-        toast('Image saved – share it on WhatsApp');
+        toast('Image saved – share on WhatsApp');
       }, 'image/png');
     } catch (err) {
       if (card.parentNode) document.body.removeChild(card);
@@ -1822,6 +1861,44 @@
         const prev = $('#logoPreview');
         if (prev) prev.innerHTML = '<span>No logo</span>';
         toast('Logo removed – tap Save Settings');
+        break;
+      case 'pick-qr': {
+        const fileInput = $('#qrFile');
+        if (!fileInput) break;
+        fileInput.onchange = () => {
+          const file = fileInput.files && fileInput.files[0];
+          if (!file) return;
+          if (file.size > 800 * 1024) { toast('QR image must be under 800KB'); return; }
+          const reader = new FileReader();
+          reader.onload = () => {
+            const img = new Image();
+            img.onload = () => {
+              const max = 400;
+              let w = img.width, h = img.height;
+              if (w > max || h > max) {
+                if (w > h) { h = Math.round(h * max / w); w = max; }
+                else { w = Math.round(w * max / h); h = max; }
+              }
+              const canvas = document.createElement('canvas');
+              canvas.width = w; canvas.height = h;
+              canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+              settings.paymentQr = canvas.toDataURL('image/png');
+              const prev = $('#qrPreview');
+              if (prev) prev.innerHTML = `<img src="${settings.paymentQr}" alt="QR" />`;
+              toast('Payment QR ready – tap Save Settings');
+            };
+            img.src = reader.result;
+          };
+          reader.readAsDataURL(file);
+        };
+        fileInput.click();
+        break;
+      }
+      case 'remove-qr':
+        settings.paymentQr = '';
+        const qprev = $('#qrPreview');
+        if (qprev) qprev.innerHTML = '<span>No QR</span>';
+        toast('QR removed – tap Save Settings');
         break;
       case 'filter-select':
         // handled by input listener
