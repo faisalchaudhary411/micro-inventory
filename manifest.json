@@ -1,6 +1,6 @@
 {
-  "name": "StockBill – Inventory & Invoices",
-  "short_name": "StockBill",
+  "name": "Hisably – Inventory & Invoices",
+  "short_name": "Hisably",
   "description": "Simple inventory, invoicing, customers & reports for micro sellers",
   "start_url": "./index.html",
   "display": "standalone",

@@ -1,4 +1,4 @@
-# StockBill v2 – Inventory, Invoices & Business
+# Hisably v2 – Inventory, Invoices & Business
 
 Mobile-first app for micro sellers (Pakistan, India, Bangladesh + English markets).
 
